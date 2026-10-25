@@ -30,13 +30,13 @@
 <label>Seuil "au point" (cm) <input id="thr" type="number" value="10" min="2" max="100"></label>
 </p>
 <button id="start" disabled>Démarrer la caméra AR</button>
-<p style="font-size:14px">Mode d'emploi : 1) vise le sol, un anneau blanc apparaît. 2) Touche l'écran pour poser le point de départ O. 3) Touche une 2e fois pour fixer la direction de la 1re ligne. La grille apparaît. Les chiffres (lignes, colonnes, espacement) sont des valeurs de test, pas un plan.</p>
+<p style="font-size:14px">Mode d'emploi : 1) vise le sol, un anneau blanc apparaît. 2) Touche l'écran pour poser le point de départ O. 3) Touche une 2e fois pour fixer la direction de la 1re ligne. La grille apparaît. Les chiffres (lignes, colonnes, espacement, seuil) sont des valeurs de test, pas une recommandation de plantation.</p><p style="font-size:14px">Pour juger la dérive : pose un objet réel (piquet, pierre) à O, marche, reviens le viser et touche « Écart au repère physique ». Sans objet réel posé à O, ce chiffre ne prouve rien : l'ancrage peut se tromper de façon cohérente avec lui-même.</p>
 </main>
 <div id="big"></div>
 <div id="hud">
  <div id="info">Vise le sol, puis touche pour poser O.</div>
  <button id="reset" class="sec">Recommencer</button>
- <button id="drift" class="sec">Mesurer la dérive</button>
+ <button id="drift" class="sec">Écart au repère physique</button>
  <button id="end" class="sec">Quitter</button>
 </div>
 <script>
@@ -107,7 +107,7 @@ $('end').onclick=()=>{if(xrSession)xrSession.end();};
 $('drift').onclick=()=>{
   if(!originPoint||!reticle){driftMsg='Pose d\'abord O, puis reviens viser O.';return;}
   const dx=reticle[0]-originPoint[0],dz=reticle[2]-originPoint[2];
-  driftMsg='Écart entre O et le point visé : '+(Math.hypot(dx,dz)*100).toFixed(0)+' cm (vise O au sol avant de toucher).';
+  driftMsg='Écart entre O et le point visé : '+(Math.hypot(dx,dz)*100).toFixed(0)+' cm. Valable seulement si tu vises un repère réel (piquet, pierre) posé à O.';
 };
 
 function frame(t,f){
