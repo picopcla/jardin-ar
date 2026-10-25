@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Jardin AR - test de stabilité</title>
+<style>
+ body{margin:0;font-family:system-ui,sans-serif;background:#f4efe6;color:#222}
+ main{max-width:560px;margin:0 auto;padding:20px}
+ h1{font-size:22px;margin:0 0 8px}
+ button{font-size:17px;padding:12px 16px;border-radius:10px;border:0;background:#2e7d32;color:#fff;margin:4px 4px 4px 0}
+ button.sec{background:#555}
+ #status{margin:12px 0;padding:10px;background:#fff;border-radius:8px;font-size:15px}
+ #hud{position:fixed;left:0;right:0;bottom:0;padding:10px;background:rgba(0,0,0,.6);color:#fff;font-size:16px;display:none}
+ #hud button{font-size:15px;padding:10px 12px}
+ #big{position:fixed;top:12px;left:0;right:0;text-align:center;color:#fff;font-size:26px;font-weight:700;text-shadow:0 0 6px #000;display:none;pointer-events:none}
+ label{font-size:14px;margin-right:8px}
+ input{width:64px;font-size:16px}
+</style>
+</head>
+<body>
+<main id="intro">
+<h1>Jardin AR - test de stabilité</h1>
+<p>Test d'une grille de repères posée au sol avec la caméra. Aucune précision n'est garantie : le but est de voir si les points restent en place quand tu marches.</p>
+<div id="status">Vérification de la compatibilité...</div>
+<p>
+<label>Lignes <input id="rows" type="number" value="10" min="1" max="60"></label>
+<label>Colonnes <input id="cols" type="number" value="20" min="1" max="60"></label><br>
+<label>Espacement (cm) <input id="spacing" type="number" value="50" min="10" max="300"></label>
+<label>Seuil "au point" (cm) <input id="thr" type="number" value="10" min="2" max="100"></label>
+</p>
+<button id="start" disabled>Démarrer la caméra AR</button>
+<p style="font-size:14px">Mode d'emploi : 1) vise le sol, un anneau blanc apparaît. 2) Touche l'écran pour poser le point de départ O. 3) Touche une 2e fois pour fixer la direction de la 1re ligne. La grille apparaît. Les chiffres (lignes, colonnes, espacement) sont des valeurs de test, pas un plan.</p>
+</main>
+<div id="big"></div>
+<div id="hud">
+ <div id="info">Vise le sol, puis touche pour poser O.</div>
+ <button id="reset" class="sec">Recommencer</button>
+ <button id="drift" class="sec">Mesurer la dérive</button>
+ <button id="end" class="sec">Quitter</button>
+</div>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const statusEl=$('status'), startBtn=$('start'), hud=$('hud'), info=$('info'), big=$('big');
+let xrSession=null, gl=null, refSpace=null, hitSource=null, prog=null, buf=null;
+let originAnchor=null, originPose=null, dirPoint=null, pendingTap=false, step=0;
+let reticle=null, camPos=null, cfg={rows:10,cols:20,sp:0.5,thr:0.1};
+let originPoint=null, axisU=null, axisV=null, driftMsg='', hasAnchors=false;
+
+async function check(){
+  if(!navigator.xr){statusEl.textContent="WebXR indisponible dans ce navigateur. Ouvre cette page dans Chrome sur Android.";return;}
+  try{
+    const ok=await navigator.xr.isSessionSupported('immersive-ar');
+    if(ok){statusEl.textContent="AR possible sur ce téléphone/navigateur (reste à tester en vrai).";startBtn.disabled=false;}
+    else statusEl.textContent="AR immersive non supportée ici (ARCore / Services Google Play pour la RA requis).";
+  }catch(e){statusEl.textContent="Erreur de vérification : "+e.message;}
+}
+check();
+
+const vs=`attribute vec3 p;uniform mat4 vp;uniform vec3 c;uniform float s;void main(){gl_Position=vp*vec4(c+p*s,1.0);}`;
+const fs=`precision mediump float;uniform vec4 col;void main(){gl_FragColor=col;}`;
+function sh(t,src){const x=gl.createShader(t);gl.shaderSource(x,src);gl.compileShader(x);if(!gl.getShaderParameter(x,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(x));return x;}
+function initGL(){
+  prog=gl.createProgram();gl.attachShader(prog,sh(gl.VERTEX_SHADER,vs));gl.attachShader(prog,sh(gl.FRAGMENT_SHADER,fs));gl.linkProgram(prog);
+  const n=24,v=[0,0,0];for(let i=0;i<=n;i++){const a=i/n*2*Math.PI;v.push(Math.cos(a),0,Math.sin(a));}
+  buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(v),gl.STATIC_DRAW);
+  gl.useProgram(prog);
+}
+function disc(vpm,c,s,col){
+  gl.useProgram(prog);gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+  const loc=gl.getAttribLocation(prog,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,3,gl.FLOAT,false,0,0);
+  gl.uniformMatrix4fv(gl.getUniformLocation(prog,'vp'),false,vpm);
+  gl.uniform3f(gl.getUniformLocation(prog,'c'),c[0],c[1]+0.004,c[2]);
+  gl.uniform1f(gl.getUniformLocation(prog,'s'),s);
+  gl.uniform4f(gl.getUniformLocation(prog,'col'),col[0],col[1],col[2],col[3]);
+  gl.drawArrays(gl.TRIANGLE_FAN,0,26);
+}
+function mul(a,b){const o=new Float32Array(16);for(let i=0;i<4;i++)for(let j=0;j<4;j++){let s=0;for(let k=0;k<4;k++)s+=a[k*4+j]*b[i*4+k];o[i*4+j]=s;}return o;}
+
+function readCfg(){
+  cfg.rows=Math.max(1,Math.min(60,+$('rows').value||10));cfg.cols=Math.max(1,Math.min(60,+$('cols').value||20));
+  cfg.sp=Math.max(0.1,Math.min(3,(+$('spacing').value||50)/100));cfg.thr=Math.max(0.02,Math.min(1,(+$('thr').value||10)/100));
+}
+startBtn.onclick=async()=>{
+  readCfg();
+  try{
+    const feats={requiredFeatures:['hit-test'],optionalFeatures:['anchors','local-floor','dom-overlay'],domOverlay:{root:document.body}};
+    xrSession=await navigator.xr.requestSession('immersive-ar',feats);
+  }catch(e){statusEl.textContent="Impossible de démarrer l'AR : "+e.message;return;}
+  const canvas=document.createElement('canvas');gl=canvas.getContext('webgl',{xrCompatible:true,alpha:true});
+  initGL();
+  xrSession.updateRenderState({baseLayer:new XRWebGLLayer(xrSession,gl)});
+  refSpace=await xrSession.requestReferenceSpace('local-floor').catch(()=>xrSession.requestReferenceSpace('local'));
+  const viewer=await xrSession.requestReferenceSpace('viewer');
+  hitSource=await xrSession.requestHitTestSource({space:viewer});
+  hasAnchors=!!(xrSession.enabledFeatures&&xrSession.enabledFeatures.includes('anchors'));
+  $('intro').style.display='none';hud.style.display='block';big.style.display='block';
+  step=0;originAnchor=null;originPoint=null;axisU=null;driftMsg='';
+  xrSession.addEventListener('select',()=>{pendingTap=true;});
+  xrSession.addEventListener('end',()=>{xrSession=null;hud.style.display='none';big.style.display='none';$('intro').style.display='block';});
+  xrSession.requestAnimationFrame(frame);
+};
+['reset','drift','end'].forEach(id=>{$(id).addEventListener('beforexrselect',e=>e.preventDefault());});
+$('reset').onclick=()=>{step=0;originAnchor=null;originPoint=null;axisU=null;driftMsg='';};
+$('end').onclick=()=>{if(xrSession)xrSession.end();};
+$('drift').onclick=()=>{
+  if(!originPoint||!reticle){driftMsg='Pose d\'abord O, puis reviens viser O.';return;}
+  const dx=reticle[0]-originPoint[0],dz=reticle[2]-originPoint[2];
+  driftMsg='Écart entre O et le point visé : '+(Math.hypot(dx,dz)*100).toFixed(0)+' cm (vise O au sol avant de toucher).';
+};
+
+function frame(t,f){
+  xrSession.requestAnimationFrame(frame);
+  const pose=f.getViewerPose(refSpace);if(!pose)return;
+  const layer=xrSession.renderState.baseLayer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);gl.disable(gl.DEPTH_TEST);
+  const cp=pose.transform.position;camPos=[cp.x,cp.y,cp.z];
+  // reticule
+  reticle=null;
+  const hits=f.getHitTestResults(hitSource);
+  if(hits.length){const p=hits[0].getPose(refSpace);if(p){const q=p.transform.position;reticle=[q.x,q.y,q.z];}}
+  // origine ancree : suivre l'ancre
+  if(originAnchor){const ap=f.getPose(originAnchor.anchorSpace,refSpace);if(ap){const q=ap.transform.position;originPoint=[q.x,q.y,q.z];}}
+  if(pendingTap){
+    pendingTap=false;
+    if(reticle){
+      if(step===0){
+        originPoint=reticle.slice();step=1;
+        if(hasAnchors&&hits.length&&hits[0].createAnchor){hits[0].createAnchor().then(a=>{originAnchor={anchorSpace:a};}).catch(()=>{});}
+      }else if(step===1){
+        let ux=reticle[0]-originPoint[0],uz=reticle[2]-originPoint[2];const n=Math.hypot(ux,uz);
+        if(n>0.3){axisU=[ux/n,uz/n];axisV=[-axisU[1],axisU[0]];step=2;}
+        else driftMsg='Pose le 2e point à plus de 30 cm de O.';
+      }
+    }
+  }
+  let nearest=null,nd=1e9;
+  const pts=[];
+  if(step===2&&originPoint){
+    for(let r=0;r<cfg.rows;r++)for(let c=0;c<cfg.cols;c++){
+      const x=originPoint[0]+axisU[0]*c*cfg.sp+axisV[0]*r*cfg.sp;
+      const z=originPoint[2]+axisU[1]*c*cfg.sp+axisV[1]*r*cfg.sp;
+      pts.push({x,y:originPoint[1],z,r,c});
+    }
+    if(reticle)for(const p of pts){const d=Math.hypot(p.x-reticle[0],p.z-reticle[2]);if(d<nd){nd=d;nearest=p;}}
+  }
+  for(const view of pose.views){
+    const vp=layer.getViewport(view);gl.viewport(vp.x,vp.y,vp.width,vp.height);
+    const viewM=view.transform.inverse.matrix;const vpm=mul(view.projectionMatrix,viewM);
+    if(reticle)disc(vpm,reticle,0.05,[1,1,1,0.55]);
+    if(originPoint)disc(vpm,originPoint,0.06,[1,0.55,0,0.9]);
+    for(const p of pts){
+      if(Math.hypot(p.x-camPos[0],p.z-camPos[2])>4)continue;
+      const isN=(p===nearest)&&nd<1.0;
+      const near=isN&&nd<=cfg.thr;
+      disc(vpm,[p.x,p.y,p.z],isN?0.05:0.03,near?[0.1,1,0.2,0.95]:(isN?[1,0.9,0.1,0.95]:[1,1,1,0.85]));
+    }
+  }
+  // texte
+  let msg='';
+  if(!reticle&&step<2)msg='Cherche le sol : bouge lentement le téléphone';
+  else if(step===0)msg='Touche pour poser O';
+  else if(step===1)msg='Touche un 2e point pour la direction';
+  else if(nearest)msg=(nd<=cfg.thr?'AU POINT ':'Point proche : ')+(nd*100).toFixed(0)+' cm  (ligne '+(nearest.r+1)+', col. '+(nearest.c+1)+')';
+  big.textContent=msg;
+  info.textContent=(driftMsg?driftMsg:'Étape '+(Math.min(step,2)+1)+'/3 - ancrage '+(originAnchor?'actif':'(en attente ou indisponible)'));
+}
+</script>
+</body>
+</html>
